@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import argparse
+import time
 from typing import Dict, List
 from tqdm import tqdm
 
@@ -109,16 +110,88 @@ def process_coding_standard(organization: str, name: str, config_file: str) -> D
                 } for pattern in tool['patterns'] if pattern['enabled']
             ]
             update_coding_standard_tool(organization, coding_standard_id, tool_uuid, tool['isEnabled'], patterns)
-        except requests.RequestException as e:
+        except requests.exceptions.HTTPError as e:
             print(f"Error updating tool: {e}")
 
     try:
         print("Promoting coding standard to active")
         promote_coding_standard(organization, coding_standard_id)
-    except requests.RequestException as e:
+    except requests.exceptions.HTTPError as e:
         print(f"Error promoting coding standard: {e}")
     
     return standard
+
+def list_organization_repositories(organization: str, cursor: str = None) -> Dict:
+    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/repositories"
+    params = {"limit": 100}
+    if cursor:
+        params["cursor"] = cursor
+    
+    response = requests.get(url, headers=get_codacy_headers(), params=params)
+    response.raise_for_status()
+    return response.json()
+
+def apply_coding_standard_to_repository(organization: str, coding_standard_id: str, repository: str, max_retries: int = 3) -> Dict:
+    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards/{coding_standard_id}/repositories"
+    data = {
+        "link": [repository],
+        "unlink": []  # Include an empty unlink list
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.patch(url, headers=get_codacy_headers(), json=data)
+            response.raise_for_status()
+            return {"success": True, "response": response.json()}
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 400:
+                # Capture the response content for 400 errors
+                error_content = e.response.text
+                return {"success": False, "error": str(e), "status_code": e.response.status_code, "error_content": error_content}
+            if attempt == max_retries - 1:
+                return {"success": False, "error": str(e), "status_code": e.response.status_code}
+            time.sleep(2 ** attempt)  # Exponential backoff
+    
+    return {"success": False, "error": "Max retries reached"}
+
+def apply_coding_standard_to_all_repositories(organization: str, coding_standard_id: str):
+    all_repositories = []
+    cursor = None
+    
+    while True:
+        repo_data = list_organization_repositories(organization, cursor)
+        repositories = repo_data.get('data', [])
+        all_repositories.extend([repo['name'] for repo in repositories])
+        
+        pagination_info = repo_data.get('pagination')
+        if not pagination_info or not pagination_info.get('cursor'):
+            break
+        cursor = pagination_info['cursor']
+    
+    total_repos = len(all_repositories)
+    print(f"Applying coding standard to {total_repos} repositories individually")
+    
+    results = {"successful": [], "failed": []}
+    for repo in tqdm(all_repositories, desc="Processing repositories"):
+        result = apply_coding_standard_to_repository(organization, coding_standard_id, repo)
+        if result["success"]:
+            results["successful"].append(repo)
+        else:
+            error_msg = f"Error applying to repository {repo}: {result['error']}"
+            if 'error_content' in result:
+                error_msg += f"\nError content: {result['error_content']}"
+            print(error_msg)
+            results["failed"].append({
+                "repo": repo,
+                "error": result['error'],
+                "status_code": result.get('status_code'),
+                "error_content": result.get('error_content')
+            })
+        time.sleep(1)  # Add a delay between requests to avoid rate limiting
+    
+    print(f"Finished applying coding standard to all repositories")
+    print(f"Successful: {len(results['successful'])}, Failed: {len(results['failed'])}")
+    return results
 
 def main():
     parser = argparse.ArgumentParser(description="Comprehensive Coding Standard Management Script")
@@ -133,11 +206,23 @@ def main():
 
     try:
         result = process_coding_standard(args.organization, args.name, args.config)
+        coding_standard_id = result['data']['id']
+        
+        apply_results = apply_coding_standard_to_all_repositories(args.organization, coding_standard_id)
         
         output_filename = f"{args.name.replace(' ', '_').lower()}_result.json"
-        save_json_file(result, output_filename)
+        save_json_file({"standard_creation": result, "apply_to_repositories": apply_results}, output_filename)
         print(f"Final result saved to {output_filename}")
-        print("Coding standard creation, update, and promotion completed successfully!")
+        print("Coding standard creation, update, promotion, and application to repositories completed.")
+        print(f"Successfully applied to {len(apply_results['successful'])} repositories.")
+        print(f"Failed to apply to {len(apply_results['failed'])} repositories.")
+        
+        if apply_results['failed']:
+            print("\nFailed repositories:")
+            for failed_repo in apply_results['failed']:
+                print(f"  - {failed_repo['repo']}: Error {failed_repo.get('status_code', 'N/A')} - {failed_repo['error']}")
+                if 'error_content' in failed_repo:
+                    print(f"    Error content: {failed_repo['error_content']}")
 
     except Exception as e:
         print(f"An error occurred: {e}")
