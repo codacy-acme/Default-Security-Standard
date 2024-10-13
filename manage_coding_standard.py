@@ -131,10 +131,10 @@ def list_organization_repositories(organization: str, cursor: str = None) -> Dic
     response.raise_for_status()
     return response.json()
 
-def apply_coding_standard_to_repository(organization: str, coding_standard_id: str, repository: str, max_retries: int = 3) -> Dict:
+def apply_coding_standard_to_repositories(organization: str, coding_standard_id: str, repositories: List[str], max_retries: int = 3) -> Dict:
     url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards/{coding_standard_id}/repositories"
     data = {
-        "link": [repository],
+        "link": repositories,
         "unlink": []  # Include an empty unlink list
     }
     
@@ -154,7 +154,7 @@ def apply_coding_standard_to_repository(organization: str, coding_standard_id: s
     
     return {"success": False, "error": "Max retries reached"}
 
-def apply_coding_standard_to_all_repositories(organization: str, coding_standard_id: str):
+def apply_coding_standard_to_all_repositories(organization: str, coding_standard_id: str, batch_size: int = 75):
     all_repositories = []
     cursor = None
     
@@ -169,25 +169,26 @@ def apply_coding_standard_to_all_repositories(organization: str, coding_standard
         cursor = pagination_info['cursor']
     
     total_repos = len(all_repositories)
-    print(f"Applying coding standard to {total_repos} repositories individually")
+    print(f"Applying coding standard to {total_repos} repositories in batches of {batch_size}")
     
     results = {"successful": [], "failed": []}
-    for repo in tqdm(all_repositories, desc="Processing repositories"):
-        result = apply_coding_standard_to_repository(organization, coding_standard_id, repo)
+    for i in tqdm(range(0, total_repos, batch_size), desc="Processing batches"):
+        batch = all_repositories[i:i+batch_size]
+        result = apply_coding_standard_to_repositories(organization, coding_standard_id, batch)
         if result["success"]:
-            results["successful"].append(repo)
+            results["successful"].extend(batch)
         else:
-            error_msg = f"Error applying to repository {repo}: {result['error']}"
+            error_msg = f"Error applying to batch {i//batch_size + 1}: {result['error']}"
             if 'error_content' in result:
                 error_msg += f"\nError content: {result['error_content']}"
             print(error_msg)
-            results["failed"].append({
+            results["failed"].extend([{
                 "repo": repo,
                 "error": result['error'],
                 "status_code": result.get('status_code'),
                 "error_content": result.get('error_content')
-            })
-        time.sleep(1)  # Add a delay between requests to avoid rate limiting
+            } for repo in batch])
+        time.sleep(1)  # Add a delay between batches to avoid rate limiting
     
     print(f"Finished applying coding standard to all repositories")
     print(f"Successful: {len(results['successful'])}, Failed: {len(results['failed'])}")
@@ -198,6 +199,7 @@ def main():
     parser.add_argument("--organization", required=True, help="Codacy organization name")
     parser.add_argument("--name", required=True, help="Name for the new coding standard")
     parser.add_argument("--config", required=True, help="Path to JSON configuration file")
+    parser.add_argument("--batch-size", type=int, default=75, help="Number of repositories to process in each batch")
     
     args = parser.parse_args()
 
@@ -208,7 +210,7 @@ def main():
         result = process_coding_standard(args.organization, args.name, args.config)
         coding_standard_id = result['data']['id']
         
-        apply_results = apply_coding_standard_to_all_repositories(args.organization, coding_standard_id)
+        apply_results = apply_coding_standard_to_all_repositories(args.organization, coding_standard_id, args.batch_size)
         
         output_filename = f"{args.name.replace(' ', '_').lower()}_result.json"
         save_json_file({"standard_creation": result, "apply_to_repositories": apply_results}, output_filename)
