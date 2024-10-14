@@ -9,7 +9,6 @@ from tqdm import tqdm
 # Codacy API configuration
 CODACY_API_TOKEN = os.environ.get("CODACY_API_TOKEN")
 CODACY_API_BASE_URL = "https://app.codacy.com/api/v3"
-PROVIDER = "gh"  # Assuming GitHub, change if different
 
 def get_codacy_headers() -> Dict[str, str]:
     return {
@@ -18,8 +17,8 @@ def get_codacy_headers() -> Dict[str, str]:
         "Content-Type": "application/json"
     }
 
-def create_coding_standard(organization: str, name: str, languages: List[str]) -> Dict:
-    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards"
+def create_coding_standard(organization: str, name: str, languages: List[str], provider: str) -> Dict:
+    url = f"{CODACY_API_BASE_URL}/organizations/{provider}/{organization}/coding-standards"
     data = {
         "name": name,
         "languages": languages
@@ -29,20 +28,20 @@ def create_coding_standard(organization: str, name: str, languages: List[str]) -
     response.raise_for_status()
     return response.json()
 
-def list_coding_standard_tools(organization: str, coding_standard_id: str) -> List[Dict]:
-    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards/{coding_standard_id}/tools"
+def list_coding_standard_tools(organization: str, coding_standard_id: str, provider: str) -> List[Dict]:
+    url = f"{CODACY_API_BASE_URL}/organizations/{provider}/{organization}/coding-standards/{coding_standard_id}/tools"
     response = requests.get(url, headers=get_codacy_headers())
     response.raise_for_status()
     return response.json()['data']
 
-def list_tool_patterns(organization: str, coding_standard_id: str, tool_uuid: str) -> List[Dict]:
-    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards/{coding_standard_id}/tools/{tool_uuid}/patterns"
+def list_tool_patterns(organization: str, coding_standard_id: str, tool_uuid: str, provider: str) -> List[Dict]:
+    url = f"{CODACY_API_BASE_URL}/organizations/{provider}/{organization}/coding-standards/{coding_standard_id}/tools/{tool_uuid}/patterns"
     response = requests.get(url, headers=get_codacy_headers())
     response.raise_for_status()
     return response.json()['data']
 
-def update_coding_standard_tool(organization: str, coding_standard_id: str, tool_uuid: str, enabled: bool, patterns: List[Dict] = None) -> Dict:
-    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards/{coding_standard_id}/tools/{tool_uuid}"
+def update_coding_standard_tool(organization: str, coding_standard_id: str, tool_uuid: str, enabled: bool, patterns: List[Dict], provider: str) -> Dict:
+    url = f"{CODACY_API_BASE_URL}/organizations/{provider}/{organization}/coding-standards/{coding_standard_id}/tools/{tool_uuid}"
     data = {
         "enabled": enabled,
         "patterns": patterns or []
@@ -53,8 +52,8 @@ def update_coding_standard_tool(organization: str, coding_standard_id: str, tool
     response.raise_for_status()
     return response.json() if response.text else {}
 
-def promote_coding_standard(organization: str, coding_standard_id: str) -> Dict:
-    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards/{coding_standard_id}/promote"
+def promote_coding_standard(organization: str, coding_standard_id: str, provider: str) -> Dict:
+    url = f"{CODACY_API_BASE_URL}/organizations/{provider}/{organization}/coding-standards/{coding_standard_id}/promote"
     print("Promoting coding standard")
     response = requests.post(url, headers=get_codacy_headers())
     response.raise_for_status()
@@ -68,22 +67,22 @@ def save_json_file(data: Dict, filename: str):
     with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
 
-def process_coding_standard(organization: str, name: str, config_file: str) -> Dict:
+def process_coding_standard(organization: str, name: str, config_file: str, provider: str) -> Dict:
     config = load_config(config_file)
     
     languages = config.get('languages', [])
     
     print(f"Creating coding standard: {name}")
-    standard = create_coding_standard(organization, name, languages)
+    standard = create_coding_standard(organization, name, languages, provider)
     coding_standard_id = standard['data']['id']
     print(f"Coding standard created with ID: {coding_standard_id}")
     
     # List all tools
-    tools = list_coding_standard_tools(organization, coding_standard_id)
+    tools = list_coding_standard_tools(organization, coding_standard_id, provider)
     
     # Disable all tools and their patterns
     for tool in tqdm(tools, desc="Disabling all tools and patterns"):
-        patterns = list_tool_patterns(organization, coding_standard_id, tool['uuid'])
+        patterns = list_tool_patterns(organization, coding_standard_id, tool['uuid'], provider)
         print(f"Patterns for tool {tool['uuid']}:")
         print(json.dumps(patterns[:2], indent=2))  # Print first two patterns for inspection
         
@@ -94,7 +93,7 @@ def process_coding_standard(organization: str, name: str, config_file: str) -> D
             } for pattern in patterns if 'patternDefinition' in pattern and 'id' in pattern['patternDefinition']
         ]
         
-        update_coding_standard_tool(organization, coding_standard_id, tool['uuid'], False, disabled_patterns)
+        update_coding_standard_tool(organization, coding_standard_id, tool['uuid'], False, disabled_patterns, provider)
     
     # Enable and configure specified tools and patterns
     for tool in tqdm(config.get('tools', []), desc="Enabling specified tools and patterns"):
@@ -109,20 +108,20 @@ def process_coding_standard(organization: str, name: str, config_file: str) -> D
                     "parameters": pattern['parameters']
                 } for pattern in tool['patterns'] if pattern['enabled']
             ]
-            update_coding_standard_tool(organization, coding_standard_id, tool_uuid, tool['isEnabled'], patterns)
+            update_coding_standard_tool(organization, coding_standard_id, tool_uuid, tool['isEnabled'], patterns, provider)
         except requests.exceptions.HTTPError as e:
             print(f"Error updating tool: {e}")
 
     try:
         print("Promoting coding standard to active")
-        promote_coding_standard(organization, coding_standard_id)
+        promote_coding_standard(organization, coding_standard_id, provider)
     except requests.exceptions.HTTPError as e:
         print(f"Error promoting coding standard: {e}")
     
     return standard
 
-def list_organization_repositories(organization: str, cursor: str = None) -> Dict:
-    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/repositories"
+def list_organization_repositories(organization: str, provider: str, cursor: str = None) -> Dict:
+    url = f"{CODACY_API_BASE_URL}/organizations/{provider}/{organization}/repositories"
     params = {"limit": 100}
     if cursor:
         params["cursor"] = cursor
@@ -131,8 +130,8 @@ def list_organization_repositories(organization: str, cursor: str = None) -> Dic
     response.raise_for_status()
     return response.json()
 
-def apply_coding_standard_to_repositories(organization: str, coding_standard_id: str, repositories: List[str], max_retries: int = 3) -> Dict:
-    url = f"{CODACY_API_BASE_URL}/organizations/{PROVIDER}/{organization}/coding-standards/{coding_standard_id}/repositories"
+def apply_coding_standard_to_repositories(organization: str, coding_standard_id: str, repositories: List[str], provider: str, max_retries: int = 3) -> Dict:
+    url = f"{CODACY_API_BASE_URL}/organizations/{provider}/{organization}/coding-standards/{coding_standard_id}/repositories"
     data = {
         "link": repositories,
         "unlink": []  # Include an empty unlink list
@@ -154,12 +153,12 @@ def apply_coding_standard_to_repositories(organization: str, coding_standard_id:
     
     return {"success": False, "error": "Max retries reached"}
 
-def apply_coding_standard_to_all_repositories(organization: str, coding_standard_id: str, batch_size: int = 75):
+def apply_coding_standard_to_all_repositories(organization: str, coding_standard_id: str, provider: str, batch_size: int = 75):
     all_repositories = []
     cursor = None
     
     while True:
-        repo_data = list_organization_repositories(organization, cursor)
+        repo_data = list_organization_repositories(organization, provider, cursor)
         repositories = repo_data.get('data', [])
         all_repositories.extend([repo['name'] for repo in repositories])
         
@@ -174,7 +173,7 @@ def apply_coding_standard_to_all_repositories(organization: str, coding_standard
     results = {"successful": [], "failed": []}
     for i in tqdm(range(0, total_repos, batch_size), desc="Processing batches"):
         batch = all_repositories[i:i+batch_size]
-        result = apply_coding_standard_to_repositories(organization, coding_standard_id, batch)
+        result = apply_coding_standard_to_repositories(organization, coding_standard_id, batch, provider)
         if result["success"]:
             results["successful"].extend(batch)
         else:
@@ -200,6 +199,7 @@ def main():
     parser.add_argument("--name", required=True, help="Name for the new coding standard")
     parser.add_argument("--config", required=True, help="Path to JSON configuration file")
     parser.add_argument("--batch-size", type=int, default=75, help="Number of repositories to process in each batch")
+    parser.add_argument("--provider", default="gh", help="Provider (e.g., 'gh' for GitHub, 'bb' for Bitbucket, 'gl' for GitLab)")
     
     args = parser.parse_args()
 
@@ -207,10 +207,10 @@ def main():
         raise ValueError("CODACY_API_TOKEN environment variable is not set")
 
     try:
-        result = process_coding_standard(args.organization, args.name, args.config)
+        result = process_coding_standard(args.organization, args.name, args.config, args.provider)
         coding_standard_id = result['data']['id']
         
-        apply_results = apply_coding_standard_to_all_repositories(args.organization, coding_standard_id, args.batch_size)
+        apply_results = apply_coding_standard_to_all_repositories(args.organization, coding_standard_id, args.provider, args.batch_size)
         
         output_filename = f"{args.name.replace(' ', '_').lower()}_result.json"
         save_json_file({"standard_creation": result, "apply_to_repositories": apply_results}, output_filename)
